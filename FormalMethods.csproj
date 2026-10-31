@@ -1,0 +1,84 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Must match the version of the dafny tool that generates the code. -->
+    <PackageReference Include="DafnyRuntime" Version="4.11.0" />
+  </ItemGroup>
+
+  <!--
+    Dafny pre-build step: every .dfy file in this project is verified and translated into
+    $(DafnyOutputName).cs in the project folder. If a proof fails, the build fails.
+
+    All .dfy files go into ONE .cs file because each Dafny translation also emits shared helper
+    code (Dafny.ArrayHelpers, FuncExtensions, an assembly attribute); two separately translated
+    files would define those twice and fail to compile.
+
+    The generated file is overwritten on every translation: edit the .dfy files, never the .cs.
+  -->
+  <PropertyGroup>
+    <!-- Default Z3 location; override with a DafnySolverPath environment variable or
+         `dotnet build -p:DafnySolverPath=...` (see README.md). -->
+    <DafnySolverPath Condition="'$(DafnySolverPath)' == ''">$(USERPROFILE)\Documents\repos\z3\bin\z3.exe</DafnySolverPath>
+    <DafnyOutputName>Dafny</DafnyOutputName>
+    <DafnyOutputFile>$(MSBuildProjectDirectory)\$(DafnyOutputName).cs</DafnyOutputFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <DafnySource Include="**\*.dfy" Exclude="bin\**;obj\**" />
+    <!-- Copies left by running `dafny translate` by hand on a single .dfy are ignored so they can't
+         clash with the generated file. The generated file itself stays in, so the editor sees it. -->
+    <_DafnyStrayCs Include="@(DafnySource->'%(RelativeDir)%(Filename).cs')" Exclude="$(DafnyOutputName).cs" />
+    <Compile Remove="@(_DafnyStrayCs)" />
+    <None Remove="*-cs.dtr" />
+    <!-- Visual Studio's fast up-to-date check skips MSBuild entirely unless it knows about an input
+         that changed; without this, editing only a .dfy and pressing F5 would not rebuild. -->
+    <UpToDateCheckInput Include="@(DafnySource)" />
+  </ItemGroup>
+
+  <!-- Records which .dfy files exist. The file is only rewritten when that list changes, so adding a
+       .dfy (even one with an old timestamp) or deleting one makes DafnyTranslate run again. -->
+  <Target Name="DafnyWriteSourceList" BeforeTargets="DafnyTranslate">
+    <PropertyGroup>
+      <DafnySourceListFile>$(IntermediateOutputPath)DafnySources.txt</DafnySourceListFile>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(DafnySourceListFile)" Lines="@(DafnySource)" Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <FileWrites Include="$(DafnySourceListFile)" />
+    </ItemGroup>
+  </Target>
+
+  <!-- Only re-runs Dafny when a .dfy file, the list of .dfy files, or this project file is newer
+       than the generated C#. -->
+  <Target Name="DafnyTranslate" BeforeTargets="BeforeBuild" Condition="'@(DafnySource)' != ''"
+          Inputs="@(DafnySource);$(DafnySourceListFile);$(MSBuildProjectFullPath)" Outputs="$(DafnyOutputFile)">
+    <Error Condition="!Exists('$(DafnySolverPath)')"
+           Text="Z3 not found at '$(DafnySolverPath)'. Install Z3 or set DafnySolverPath; see README.md." />
+    <!-- Dafny copies its command line into the generated file, so pass only paths relative to the
+         project folder; full paths would expose the local folder layout (user name etc.). -->
+    <PropertyGroup>
+      <_DafnySolverRelPath>$([MSBuild]::MakeRelative('$(MSBuildProjectDirectory)\', '$(DafnySolverPath)'))</_DafnySolverRelPath>
+    </PropertyGroup>
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
+          Command="dafny translate cs @(DafnySource->'&quot;%(Identity)&quot;', ' ') --solver-path &quot;$(_DafnySolverRelPath)&quot; --output &quot;$(DafnyOutputName)&quot;" />
+    <Delete Files="$(MSBuildProjectDirectory)\$(DafnyOutputName)-cs.dtr" />
+  </Target>
+
+  <Target Name="DafnyIncludeGenerated" AfterTargets="DafnyTranslate" BeforeTargets="BeforeBuild"
+          Condition="'@(DafnySource)' != ''">
+    <!-- On a clean build the file didn't exist when the project was loaded, so add it now;
+         remove first so it isn't listed twice when it did exist. -->
+    <ItemGroup>
+      <Compile Remove="$(DafnyOutputName).cs" />
+      <Compile Include="$(DafnyOutputName).cs" />
+    </ItemGroup>
+  </Target>
+
+</Project>
