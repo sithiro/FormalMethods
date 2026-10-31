@@ -12,14 +12,18 @@ Each example is a bug that shipped in real software. In each case the faulty cod
 an error and works on ordinary inputs; it only fails on a rare input nobody tested. Dafny rejects
 the faulty version at build time, without running it and without being told which input to try.
 
-| # | Example         | Kind of bug                 | Dafny's check                             |
-|---|-----------------|-----------------------------|-------------------------------------------|
-| 1 | Binary search   | Integer overflow            | Arithmetic stays inside the declared type |
-| 2 | Zune freeze     | Loop that never ends        | Every loop provably terminates            |
-| 3 | Ariane 5        | Value too big for its type  | Conversions stay inside the target type   |
-| 4 | Heartbleed      | Reading past an array's end | Every array index is inside the array     |
-| 5 | Apple goto fail | Wrong result, no crash      | The result meets the `ensures` (the spec) |
-| 6 | USS Yorktown    | Division by zero            | Every divisor is non-zero                 |
+| #  | Example              | Kind of bug                                   | Dafny's check                                                     |
+|----|----------------------|-----------------------------------------------|-------------------------------------------------------------------|
+| 1  | Binary search        | Integer overflow                              | Arithmetic stays inside the declared type                         |
+| 2  | Zune freeze          | Loop that never ends                          | Every loop provably terminates                                    |
+| 3  | Ariane 5             | Value too big for its type                    | Conversions stay inside the target type                           |
+| 4  | Heartbleed           | Reading past an array's end                   | Every array index is inside the array                             |
+| 5  | Apple goto fail      | Wrong result, no crash                        | The result meets the `ensures` (the spec)                         |
+| 6  | USS Yorktown         | Division by zero                              | Every divisor is non-zero                                         |
+| 7  | Therac-25            | Overflow that disables a safety check         | Arithmetic stays in range, and the safety rule in `ensures` holds |
+| 8  | Mars Climate Orbiter | Mixed-up units                                | Each unit is its own type (a type error, not a proof)             |
+| 9  | Patriot missile      | Rounding error that grows over time           | The error bound in `ensures` holds for every uptime               |
+| 10 | The DAO              | State updated in the wrong order across calls | A rule about the object's state holds whenever outside code runs  |
 
 Each `.dfy` file contains the original faulty code in a commented-out **TRY IT** block, with
 instructions and the exact error to expect. Enable it, run `dotnet build`, and watch the build fail.
@@ -118,6 +122,74 @@ Yorktown.dfy(34,19): error : possible division by zero
 
 Dafny requires every divisor to be provably non-zero. Fix: report a zero count instead of dividing.
 
+### 7. Therac-25: an overflow that switched off a safety check (`Therac25.dfy`)
+
+Between 1985 and 1987 the Therac-25 radiation therapy machine gave several patients massive
+overdoses; some died. It relied on software alone for safety. One guard was a one-byte flag: non-zero
+meant "check the collimator before firing", zero meant "all clear". The set-up code *incremented* the
+flag instead of setting it, so every 256th pass it wrapped from 255 to 0 and the check was skipped
+([Leveson and Turner, IEEE Computer, 1993](https://cs.huji.ac.il/w~feit/sem/se11/therac.pdf)).
+
+```
+Therac25.dfy(40,22): error : result of operation might violate newtype constraint for 'byte8'
+```
+
+Fix: set the flag to 1 instead of counting. This one is caught twice: the increment can overflow, and
+if the wrap is written out on purpose (`% 256`), the safety rule `ensures newClass3 != 0` fails
+instead. In plain C#, `byte` incremented 256 times is silently 0.
+
+### 8. Mars Climate Orbiter: mixed-up units (`MarsClimateOrbiter.dfy`)
+
+On 23 September 1999 NASA lost the Mars Climate Orbiter on arrival at Mars. Ground software produced
+thruster impulses in pound-force seconds; the navigation software expected newton-seconds, as the
+interface specification said. Every firing's effect was underestimated by a factor of 4.45
+([review of the failure reports](https://arxiv.org/pdf/1903.02461)).
+
+```
+MarsClimateOrbiter.dfy(58,37): error : incorrect argument type for method in-parameter 'impulse' (expected NewtonSeconds, found PoundForceSeconds)
+```
+
+Each unit is its own `newtype`, so passing one where the other is expected does not compile; the fix
+is an explicit conversion. This is the one example that is a type check rather than a proof. C# could
+do the same with a separate struct per unit, but plain numbers are the norm. Note that the distinction
+exists only inside Dafny: in the generated C# both units are `BigInteger`.
+
+### 9. Patriot missile: a rounding error that grew with uptime (`Patriot.dfy`)
+
+On 25 February 1991 a Patriot battery at Dhahran, Saudi Arabia, failed to track an incoming Scud,
+which hit an Army barracks and killed 28 Americans. The Patriot counted time in tenths of a second and
+multiplied by 0.1 in 24-bit arithmetic; 0.1 has no exact binary form, so each tick lost about
+0.000000095 s. The battery had been running for over 100 hours, by which point its clock was about
+0.34 s behind, enough for the radar to look in the wrong place
+([GAO report IMTEC-92-26](https://www.gao.gov/products/IMTEC-92-26)).
+
+```
+Patriot.dfy(49): error : a postcondition could not be proved on this return path
+```
+
+The `ensures` says the clock never lags true time by more than 10 ms. Dafny's real numbers are exact,
+so it can tell the original breaks that promise. The TRY IT block goes further: add
+`requires ticks <= 104857` and the original verifies; make it 104858 and it fails. Dafny pins down the
+exact assumption the code silently relied on, about 2.9 hours of uptime. Fix: divide by 10 exactly.
+
+### 10. The DAO: state updated in the wrong order (`TheDao.dfy`)
+
+In June 2016 an attacker drained about 3.6 million ether from The DAO, an investment fund running on
+Ethereum. Its withdraw function sent the investor's ether first and cleared their balance last.
+Sending ether to a contract runs that contract's code, so the attacker's contract called withdraw
+again before its balance was cleared, and was paid again, repeatedly. Ethereum reversed the theft with
+a hard fork ([WithSecure Labs analysis](https://labs.withsecure.com/publications/the-hack-that-changed-the-blockchain-perspective)).
+
+```
+TheDao.dfy(68,34): error : a precondition for this call could not be proved
+```
+
+Every other example is a bug inside one calculation; this one is about the *order* of changes to an
+object's state across calls. The class states a rule, *the fund holds at least what it owes*, that
+every call must respect, including the call back in from the recipient. In the original order the
+ether has already left but the balance still says it is owed, so Dafny rejects the call back in.
+Fix: record the withdrawal first, then send.
+
 ### Why a check inside the function would not have caught these
 
 1. **You can't check for a bug you didn't think of.** To write an overflow or termination check you
@@ -125,7 +197,8 @@ Dafny requires every divisor to be provably non-zero. Fix: report a zero count i
    operation and every loop for every possible input, unprompted.
 2. **Tests only cover the inputs you pick.** Each bug needed one rare input: a billion-element array,
    the last day of a leap year, a faster rocket, a lying length field, a forged signature, a zero in
-   a form. The proof covers all of them.
+   a form, the 256th pass through a loop, 100 hours of uptime, a contract that calls back in. The
+   proof covers all of them.
 3. **Some guarantees cost too much to check at run time.** BinarySearch's contract says the input is
    sorted and "not found" really means not found; checking either means scanning the whole array.
    Dafny proves them once, at build time, at no run-time cost.
@@ -219,23 +292,55 @@ or open `FormalMethods.sln` in Visual Studio and press F5.
 Expected output:
 
 ```
+1. Binary search (Java, 2006): integer overflow in the midpoint
+---------------------------------------------------------------
 Dafny: search [2, 3, 7, 9, 12, 15] for 7 = index 2, for 5 = -1 (not found)
 C#:    (low + high) / 2 for 1,500,000,000 and 2,000,000,000 = -397,483,648 (no warning, negative index)
 
+2. Zune freeze (Microsoft, 2008): a loop that never ends
+--------------------------------------------------------
 Dafny: day 10593 since 1980 is day 366 of 2008
 C#:    original loop still running after 1,000,000 passes (stuck at 2008, day 366)
 
+3. Ariane 5 (ESA, 1996): a 64-bit value converted to 16 bits
+------------------------------------------------------------
 Dafny: ConvertHorizontalBias(40,000) = 32,767 (clamped to the 16-bit limit)
 C#:    (short)40,000 = -25,536 (no warning, wrong sign)
 
+4. Heartbleed (OpenSSL, 2014): reading past the end of the payload
+------------------------------------------------------------------
 Dafny: heartbeat "HAT" claiming 30 bytes = "" (rejected: claimed more than it sent)
 C#:    heartbeat "HAT" claiming 30 bytes = "HATuser=admin;password=hunter2" (leaked memory)
 
+5. Apple goto fail (iOS and OS X, 2014): signature never checked, no crash
+--------------------------------------------------------------------------
 Dafny: verify forged signature = -9809 (rejected)
 C#:    verify forged signature = 0 (accepted: signature never checked)
 
+6. USS Yorktown (US Navy, 1997): division by zero
+-------------------------------------------------
 Dafny: average of 1,200 over 0 readings = not computed (zero count reported)
 C#:    1,200 / 0 = DivideByZeroException (no compiler warning; the Yorktown's network crashed)
+
+7. Therac-25 (1985-87): a wrapped counter switched off a safety check
+---------------------------------------------------------------------
+Dafny: Class3 flag after 256 set-up passes = 1 (collimator check still required)
+C#:    Class3 flag after 256 set-up passes = 0 (wrapped to 0: collimator check skipped)
+
+8. Mars Climate Orbiter (NASA, 1999): pound-force seconds used as newton-seconds
+--------------------------------------------------------------------------------
+Dafny: 100 lbf·s converted to 444 N·s, trajectory correction 222
+C#:    100 lbf·s used as 100 N·s, trajectory correction 50 (about 4.45x too small: the orbiter was lost)
+
+9. Patriot missile (US Army, 1991): a rounding error that grew with uptime
+--------------------------------------------------------------------------
+Dafny: clock after 100 hours = 360,000.0000 s (exact)
+C#:    clock after 100 hours = 359,999.6567 s (0.3433 s behind: the radar looked in the wrong place)
+
+10. The DAO (Ethereum, 2016): paid out before updating the balance
+------------------------------------------------------------------
+Dafny: investor owed 10 withdraws, calling back in 5 times: paid 10, fund holds 90
+C#:    investor owed 10 withdraws, calling back in 5 times: paid 60, fund holds 40 (drained)
 ```
 
 ## How the build works
