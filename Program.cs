@@ -1,8 +1,10 @@
 ﻿using System.Numerics;
+using System.Text;
 
 // Each example was written and proven correct in Dafny (*.dfy), then translated to C# (Dafny.cs)
 // by the build. Each one is shown next to the original bug written in plain C#, which compiles
-// without a warning. Dafny's int is unbounded, so it appears here as BigInteger.
+// without an error (and, except for goto fail, without a warning). Dafny's int is unbounded, so it
+// appears here as BigInteger.
 
 // --- 1. Binary search (Java's Arrays.binarySearch overflow) -------------------------------------
 // BinarySearch requires a sorted array (proven for Dafny callers; up to us here in C#).
@@ -55,3 +57,61 @@ short safe = _module.__default.ConvertHorizontalBias(horizontalBias);
 Console.WriteLine($"Dafny: ConvertHorizontalBias({horizontalBias:N0}) = {safe:N0} (clamped to the 16-bit limit)");
 short wrapped = (short)horizontalBias;
 Console.WriteLine($"C#:    (short){horizontalBias:N0} = {wrapped:N0} (no warning, wrong sign)");
+Console.WriteLine();
+
+// --- 4. Heartbleed (2014: heartbeat length never checked against the payload) -------------------
+byte[] payload = Encoding.ASCII.GetBytes("HAT");
+// What sat next to the payload in the server's memory. C# arrays are bounds-checked, so to show
+// what C did, the payload and its neighbours are modelled as one buffer, as in OpenSSL's heap.
+byte[] serverMemory = Encoding.ASCII.GetBytes("HATuser=admin;password=hunter2");
+int claimedLength = serverMemory.Length;
+byte[] reply = _module.__default.HeartbeatResponse(payload, claimedLength);
+Console.WriteLine($"Dafny: heartbeat \"HAT\" claiming {claimedLength} bytes = \"{Encoding.ASCII.GetString(reply)}\" (rejected: claimed more than it sent)");
+byte[] leaked = new byte[claimedLength];
+Array.Copy(serverMemory, 0, leaked, 0, claimedLength);   // the original: copy claimedLength bytes, unchecked
+Console.WriteLine($"C#:    heartbeat \"HAT\" claiming {claimedLength} bytes = \"{Encoding.ASCII.GetString(leaked)}\" (leaked memory)");
+Console.WriteLine();
+
+// --- 5. Apple goto fail (2014: a duplicated line skipped the signature check) -------------------
+BigInteger serverRandom = 1234, signedParams = 5678, key = 7;
+BigInteger forgedSignature = 42;   // the real one is Sign(1234, 5678, 7) = 45440
+BigInteger verdict = _module.__default.VerifySignedServerKeyExchange(serverRandom, signedParams, forgedSignature, key);
+Console.WriteLine($"Dafny: verify forged signature = {verdict} ({(verdict == 0 ? "accepted" : "rejected")})");
+int appleVerdict = AppleVerify(1234, 5678, 42, 7);
+Console.WriteLine($"C#:    verify forged signature = {appleVerdict} ({(appleVerdict == 0 ? "accepted: signature never checked" : "rejected")})");
+Console.WriteLine();
+
+// --- 6. USS Yorktown (1997: a zero typed into a database field) --------------------------------
+BigInteger total = 1_200, count = 0;
+_module.__default.AverageReading(total, count, out bool ok, out BigInteger average);
+Console.WriteLine($"Dafny: average of {total:N0} over {count} readings = {(ok ? average.ToString() : "not computed (zero count reported)")}");
+int fieldTotal = 1_200, fieldCount = 0;   // values read from a database field at run time
+try
+{
+    Console.WriteLine($"C#:    average = {fieldTotal / fieldCount}");
+}
+catch (DivideByZeroException)
+{
+    Console.WriteLine($"C#:    {fieldTotal:N0} / {fieldCount} = DivideByZeroException (no compiler warning; the Yorktown's network crashed)");
+}
+
+// Apple's SSLVerifySignedServerKeyExchange logic, translated to C# with the duplicated goto.
+// C# flags the skipped line as CS0162 "unreachable code" (silenced here to keep the build clean),
+// but a warning is easy to miss; the C original shipped on millions of devices.
+static int AppleVerify(int serverRandom, int signedParams, int signature, int key)
+{
+    const int errSSLCrypto = -9809;
+    int err;
+    if ((err = HashUpdate(serverRandom)) != 0)
+        goto fail;
+    if ((err = HashUpdate(signedParams)) != 0)
+        goto fail;
+        goto fail;
+#pragma warning disable CS0162
+    err = signature == (serverRandom * 31 + signedParams) * key % 65521 ? 0 : errSSLCrypto;
+#pragma warning restore CS0162
+fail:
+    return err;
+
+    static int HashUpdate(int part) => part < 0 ? errSSLCrypto : 0;
+}

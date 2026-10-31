@@ -7,9 +7,14 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <!-- The Dafny version this project is built with. The dafny tool and the DafnyRuntime package
+         must be the same version; the build checks the installed tool against this. -->
+    <DafnyVersion>4.11.0</DafnyVersion>
+  </PropertyGroup>
+
   <ItemGroup>
-    <!-- Must match the version of the dafny tool that generates the code. -->
-    <PackageReference Include="DafnyRuntime" Version="4.11.0" />
+    <PackageReference Include="DafnyRuntime" Version="$(DafnyVersion)" />
   </ItemGroup>
 
   <!--
@@ -59,8 +64,34 @@
        than the generated C#. -->
   <Target Name="DafnyTranslate" BeforeTargets="BeforeBuild" Condition="'@(DafnySource)' != ''"
           Inputs="@(DafnySource);$(DafnySourceListFile);$(MSBuildProjectFullPath)" Outputs="$(DafnyOutputFile)">
+    <!-- Tool checks. They run only when Dafny is about to run, so a machine that already has an
+         up-to-date Dafny.cs can still build without the tools. -->
+
+    <!-- 1. Is the dafny tool installed? -->
+    <Exec Command="dafny --version" ConsoleToMSBuild="true" IgnoreExitCode="true" EchoOff="true"
+          StandardOutputImportance="low" StandardErrorImportance="low" IgnoreStandardErrorWarningFormat="true">
+      <Output TaskParameter="ExitCode" PropertyName="_DafnyExitCode" />
+      <Output TaskParameter="ConsoleOutput" PropertyName="_DafnyVersionOutput" />
+    </Exec>
+    <Error Condition="'$(_DafnyExitCode)' != '0'"
+           Text="Dafny is not installed (the 'dafny' command was not found). Install it with: dotnet tool install -g dafny --version $(DafnyVersion)   Then open a new terminal, or restart Visual Studio, and build again. See README.md." />
+
+    <!-- 2. Is it the version this project needs? dafny prints e.g. "4.11.0+fcb2042...". -->
+    <PropertyGroup>
+      <_DafnyInstalledVersion>$([System.Text.RegularExpressions.Regex]::Replace('$(_DafnyVersionOutput)', '\+.*$', '').Trim())</_DafnyInstalledVersion>
+    </PropertyGroup>
+    <Error Condition="'$(_DafnyInstalledVersion)' != '$(DafnyVersion)'"
+           Text="Dafny $(_DafnyInstalledVersion) is installed, but this project needs Dafny $(DafnyVersion) (it must match the DafnyRuntime package). Switch with: dotnet tool uninstall -g dafny   then: dotnet tool install -g dafny --version $(DafnyVersion)   Or change DafnyVersion in FormalMethods.csproj to $(_DafnyInstalledVersion). See README.md." />
+
+    <!-- 3. Is Z3 where the build expects it, and does it run? -->
     <Error Condition="!Exists('$(DafnySolverPath)')"
-           Text="Z3 not found at '$(DafnySolverPath)'. Install Z3 or set DafnySolverPath; see README.md." />
+           Text="Z3 not found at '$(DafnySolverPath)'. Download it from https://github.com/Z3Prover/z3/releases and extract it so z3.exe is at that path, or set DafnySolverPath to where z3.exe is. See README.md." />
+    <Exec Command="&quot;$(DafnySolverPath)&quot; --version" ConsoleToMSBuild="true" IgnoreExitCode="true" EchoOff="true"
+          StandardOutputImportance="low" StandardErrorImportance="low" IgnoreStandardErrorWarningFormat="true">
+      <Output TaskParameter="ExitCode" PropertyName="_Z3ExitCode" />
+    </Exec>
+    <Error Condition="'$(_Z3ExitCode)' != '0'"
+           Text="Z3 at '$(DafnySolverPath)' did not run. Re-download it from https://github.com/Z3Prover/z3/releases (pick the zip for your platform, e.g. x64-win). See README.md." />
     <!-- Dafny copies its command line into the generated file, so pass only paths relative to the
          project folder; full paths would expose the local folder layout (user name etc.). -->
     <PropertyGroup>
