@@ -38,7 +38,6 @@ method BinarySearch(a: array<int>, key: int) returns (index: int32)
     // Expected: the build fails before anything runs, with
     //
     //     BinarySearch.dfy(30,27): error : result of operation might violate newtype constraint for 'int32'
-    //     Dafny program verifier finished with 6 verified, 1 error
     //     Build FAILED.
     //
     // (30,27) is line 30, column 27, inside (low + high). Visual Studio lists it in the Error List.

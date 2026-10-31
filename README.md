@@ -2,39 +2,74 @@
 
 A C# console app whose core logic is written in [Dafny](https://dafny.org) and **proven correct** before it is compiled.
 
-- `BinarySearch.dfy` — Dafny source. The method states what it guarantees (`requires` / `ensures`), and Dafny proves the code meets it.
+- `*.dfy` — one Dafny file per example. Each states what it guarantees (`requires` / `ensures`), and Dafny proves the code meets it.
 - `Dafny.cs` — C# **generated** from all `.dfy` files on every build. Do not edit it; edit the `.dfy` files instead.
-- `Program.cs` — ordinary C# that calls the verified methods.
+- `Program.cs` — ordinary C# that calls each verified method, next to the original bug written in plain C#.
 
-## Why bother? The binary search bug
+## The examples: real bugs that passed every test
+
+Each example is a bug that shipped in real software. In each case the faulty code compiles in C# without
+a warning and works on ordinary inputs; it only fails on a rare input nobody tested. Dafny rejects
+the faulty version at build time, without running it and without being told which input to try.
+
+Each `.dfy` file contains the original faulty code in a commented-out **TRY IT** block, with
+instructions and the exact error to expect. Enable it, run `dotnet build`, and watch the build fail.
+
+### 1. Binary search: integer overflow (`BinarySearch.dfy`)
 
 For years Java's `Arrays.binarySearch` computed its midpoint as `(low + high) / 2`. When `low + high`
 exceeds the largest `int` (arrays of about a billion elements or more), the sum overflows to a negative
 number and the search crashes. It passed every test, because no test used an array that large
 ([Joshua Bloch, 2006](https://research.google/blog/extra-extra-read-all-about-it-nearly-all-binary-searches-and-mergesorts-are-broken/)).
 
-`BinarySearch.dfy` uses 32-bit integers like Java and C#. With the original midpoint, the build fails:
-
 ```
 BinarySearch.dfy(30,27): error : result of operation might violate newtype constraint for 'int32'
-Dafny program verifier finished with 6 verified, 1 error
-Build FAILED.
 ```
 
-The same line in plain C# compiles without a warning and silently returns a negative number;
-`Program.cs` shows it.
+Fix: `low + (high - low) / 2`. In plain C#, `(low + high) / 2` for 1,500,000,000 and 2,000,000,000
+silently gives `-397,483,648`.
 
-With the fix, `low + (high - low) / 2`, it verifies. Three things a check inside the function could not do:
+### 2. Zune freeze: a loop that never ends (`ZuneFreeze.dfy`)
 
-1. **Find a bug nobody thought of.** To write an overflow check you must already suspect the overflow,
-   at which point you would just fix it. Dafny checks every operation for every possible input.
-2. **Cover inputs tests never use.** A test proves one call works; the proof covers every array size
-   and content, including the billion-element ones.
-3. **Guarantee what is too costly to check at run time.** The contract says the input is sorted and
-   that "not found" really means not found. Checking either at run time means scanning the whole
-   array, which defeats the point of binary search. Dafny proves them once, at build time, for free.
+On 31 December 2008 every Microsoft Zune 30GB froze at boot. Its clock driver turned "days since 1980"
+into a year with a loop that, on the 366th day of a leap year, changed nothing and spun forever. It had
+worked on every other day for years
+([Microsoft developer blog](https://learn.microsoft.com/en-us/archive/blogs/asklar/hello-w0rld0)).
 
-To see it fail, follow the "TRY IT" comment under line 30 of `BinarySearch.dfy` and build.
+```
+ZuneFreeze.dfy(52,2): error : cannot prove termination; try supplying a decreases clause for the loop
+```
+
+Dafny requires every loop to provably end. The fixed version states `decreases days` and Dafny proves
+`days` shrinks on every pass. In plain C#, the original loop is still running after a million passes.
+
+### 3. Ariane 5: an unsafe narrowing conversion (`Ariane5.dfy`)
+
+On 4 June 1996 the first Ariane 5 rocket broke up about 40 seconds after launch. Software reused from
+Ariane 4 converted a 64-bit value (the horizontal bias) to a 16-bit integer; on Ariane 5's faster
+trajectory it no longer fit, the conversion failed, and both guidance computers shut down
+([Inquiry Board report](https://www.dcs.gla.ac.uk/~johnson/teaching/safety/reports/ariane5.html)).
+
+```
+Ariane5.dfy(45,10): error : result of operation might violate newtype constraint for 'int16'
+```
+
+Fix: prove the value fits, here by clamping out-of-range values to the 16-bit limits. In plain C#,
+`(short)40000` silently becomes `-25536`.
+
+(The original value was a 64-bit floating-point number; the example uses a 64-bit integer, which
+makes the same point more simply.)
+
+### Why a check inside the function would not have caught these
+
+1. **You can't check for a bug you didn't think of.** To write an overflow or termination check you
+   must already suspect the problem, at which point you would just fix it. Dafny checks every
+   operation and every loop for every possible input, unprompted.
+2. **Tests only cover the inputs you pick.** Each bug needed one rare input: a billion-element array,
+   the last day of a leap year, a faster rocket. The proof covers all of them.
+3. **Some guarantees cost too much to check at run time.** BinarySearch's contract says the input is
+   sorted and "not found" really means not found; checking either means scanning the whole array.
+   Dafny proves them once, at build time, at no run-time cost.
 
 ## Prerequisites
 
@@ -117,12 +152,14 @@ or open `FormalMethods.sln` in Visual Studio and press F5.
 Expected output:
 
 ```
-Sorted:  2, 3, 7, 9, 12, 15
-Search 7: found at index 2
-Search 15: found at index 5
-Search 5: not found
+Dafny: search [2, 3, 7, 9, 12, 15] for 7 = index 2, for 5 = -1 (not found)
+C#:    (low + high) / 2 for 1,500,000,000 and 2,000,000,000 = -397,483,648 (no warning, negative index)
 
-C# (low + high) / 2 with both = int.MaxValue: -1
+Dafny: day 10593 since 1980 is day 366 of 2008
+C#:    original loop still running after 1,000,000 passes (stuck at 2008, day 366)
+
+Dafny: ConvertHorizontalBias(40,000) = 32,767 (clamped to the 16-bit limit)
+C#:    (short)40,000 = -25,536 (no warning, wrong sign)
 ```
 
 ## How the build works
