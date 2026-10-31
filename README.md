@@ -2,9 +2,39 @@
 
 A C# console app whose core logic is written in [Dafny](https://dafny.org) and **proven correct** before it is compiled.
 
-- `Max.dfy`, `Min.dfy` — Dafny source. Each method states what it guarantees (`requires` / `ensures`), and Dafny proves the code meets it.
+- `BinarySearch.dfy` — Dafny source. The method states what it guarantees (`requires` / `ensures`), and Dafny proves the code meets it.
 - `Dafny.cs` — C# **generated** from all `.dfy` files on every build. Do not edit it; edit the `.dfy` files instead.
 - `Program.cs` — ordinary C# that calls the verified methods.
+
+## Why bother? The binary search bug
+
+For years Java's `Arrays.binarySearch` computed its midpoint as `(low + high) / 2`. When `low + high`
+exceeds the largest `int` (arrays of about a billion elements or more), the sum overflows to a negative
+number and the search crashes. It passed every test, because no test used an array that large
+([Joshua Bloch, 2006](https://research.google/blog/extra-extra-read-all-about-it-nearly-all-binary-searches-and-mergesorts-are-broken/)).
+
+`BinarySearch.dfy` uses 32-bit integers like Java and C#. With the original midpoint, the build fails:
+
+```
+BinarySearch.dfy(30,27): error : result of operation might violate newtype constraint for 'int32'
+Dafny program verifier finished with 6 verified, 1 error
+Build FAILED.
+```
+
+The same line in plain C# compiles without a warning and silently returns a negative number;
+`Program.cs` shows it.
+
+With the fix, `low + (high - low) / 2`, it verifies. Three things a check inside the function could not do:
+
+1. **Find a bug nobody thought of.** To write an overflow check you must already suspect the overflow,
+   at which point you would just fix it. Dafny checks every operation for every possible input.
+2. **Cover inputs tests never use.** A test proves one call works; the proof covers every array size
+   and content, including the billion-element ones.
+3. **Guarantee what is too costly to check at run time.** The contract says the input is sorted and
+   that "not found" really means not found. Checking either at run time means scanning the whole
+   array, which defeats the point of binary search. Dafny proves them once, at build time, for free.
+
+To see it fail, follow the "TRY IT" comment under line 30 of `BinarySearch.dfy` and build.
 
 ## Prerequisites
 
@@ -87,9 +117,12 @@ or open `FormalMethods.sln` in Visual Studio and press F5.
 Expected output:
 
 ```
-Numbers: 3, 9, 2, 7
-Max:     9
-Min:     2
+Sorted:  2, 3, 7, 9, 12, 15
+Search 7: found at index 2
+Search 15: found at index 5
+Search 5: not found
+
+C# (low + high) / 2 with both = int.MaxValue: -1
 ```
 
 ## How the build works
@@ -106,7 +139,9 @@ dafny translate cs <all .dfy files> --solver-path <Z3> --output Dafny
 - **New Dafny files** are picked up automatically: add a `.dfy` anywhere in the project folder and build. Top-level methods are called from C# as `_module.__default.MethodName(...)`.
 - Dafny's `int` is unbounded, so it becomes `System.Numerics.BigInteger` in C#.
 
-Calling a verified method from C# does not re-check its `requires`. For example, `Max` and `Min` require a non-empty array; passing an empty one from C# will throw at runtime.
+Calling a verified method from C# does not re-check its `requires`. For example, `BinarySearch` requires a sorted array; passing an unsorted one from C# gives wrong answers. Dafny proves it for Dafny callers only.
+
+`.editorconfig` silences the harmless warnings Dafny's generated code triggers (e.g. CS0162), for `Dafny.cs` only. C# still warns when you pass `null` to a Dafny method.
 
 ## Troubleshooting
 
@@ -115,6 +150,6 @@ Calling a verified method from C# does not re-check its `requires`. For example,
 | `'dafny' is not recognized`                                                   | Install Dafny (step 1) and open a new terminal / restart Visual Studio.            |
 | `Z3 not found at '...'`                                                       | Install Z3 (step 2) or set `DafnySolverPath`.                                      |
 | `NullReferenceException ... SetZ3ExecutablePath` when running `dafny` by hand | Dafny couldn't use the Z3 it found on PATH. Pass `--solver-path <path to z3.exe>`. |
-| `Error: file ...\Max.dfy not found` when running `dafny` by hand              | Run it from this folder (`cd` here first).                                         |
+| `Error: file ...\BinarySearch.dfy not found` when running `dafny` by hand     | Run it from this folder (`cd` here first).                                         |
 | Red squiggle under `_module` in the editor                                    | Build once so `Dafny.cs` exists, then reload the project.                          |
 | Proofs fail or hang unexpectedly with a newer Z3                              | Try Z3 4.12.1, the version Dafny 4.11 is tested against.                           |
